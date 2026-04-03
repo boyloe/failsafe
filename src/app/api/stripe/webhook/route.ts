@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
 import { prisma } from "@/lib/prisma";
+import { stripeLogger } from "@/lib/logger";
 import type { Plan } from "@prisma/client";
 import type Stripe from "stripe";
 
@@ -20,7 +21,7 @@ export async function POST(req: NextRequest) {
   try {
     event = stripe.webhooks.constructEvent(body, sig, webhookSecret);
   } catch (err) {
-    console.error("Webhook signature verification failed:", err);
+    stripeLogger.error("Webhook signature verification failed", { error: err instanceof Error ? err.message : String(err) });
     return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
   }
 
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest) {
           },
         });
 
-        console.log(`✅ Upgraded user ${userId} to ${plan}`);
+        stripeLogger.info("User upgraded", { userId, plan });
         break;
       }
 
@@ -57,7 +58,7 @@ export async function POST(req: NextRequest) {
           data: { plan: plan as Plan },
         });
 
-        console.log(`🔄 Updated user ${userId} plan to ${plan}`);
+        stripeLogger.info("User plan updated", { userId, plan });
         break;
       }
 
@@ -73,7 +74,7 @@ export async function POST(req: NextRequest) {
           data: { plan: "STARTER" },
         });
 
-        console.log(`⬇️ Downgraded user ${userId} to STARTER (subscription ended)`);
+        stripeLogger.info("User downgraded to STARTER", { userId });
         break;
       }
 
@@ -105,7 +106,7 @@ export async function POST(req: NextRequest) {
             });
           }
 
-          console.log(`💳 Payment failed for user ${user.id}`);
+          stripeLogger.warn("Payment failed", { userId: user.id, customerId });
         }
         break;
       }
@@ -114,7 +115,7 @@ export async function POST(req: NextRequest) {
         break;
     }
   } catch (err) {
-    console.error("Webhook handler error:", err);
+    stripeLogger.error("Webhook handler error", { error: err instanceof Error ? err.message : String(err) });
     return NextResponse.json({ error: "Handler failed" }, { status: 500 });
   }
 
