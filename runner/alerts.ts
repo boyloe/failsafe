@@ -4,8 +4,10 @@
  * Sends failure/recovery alerts via email and Telegram.
  */
 
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { runnerLogger } from "../src/lib/logger";
+
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 export interface AlertPayload {
   clientName: string;
@@ -18,22 +20,6 @@ export interface AlertPayload {
 }
 
 // ── Email ─────────────────────────────────────────────────────────────────────
-
-function getTransporter() {
-  const host = process.env.EMAIL_SERVER_HOST;
-  const port = Number(process.env.EMAIL_SERVER_PORT ?? 587);
-  const user = process.env.EMAIL_SERVER_USER;
-  const pass = process.env.EMAIL_SERVER_PASSWORD;
-
-  if (!host || !user || !pass) return null;
-
-  return nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    auth: { user, pass },
-  });
-}
 
 function buildEmailBody(payload: AlertPayload): { subject: string; html: string } {
   const { clientName, clientUrl, flowName, status, error, ranAt } = payload;
@@ -87,20 +73,19 @@ export async function sendEmailAlert(
   toEmail: string,
   payload: AlertPayload
 ): Promise<void> {
-  const transporter = getTransporter();
-  if (!transporter) {
-    runnerLogger.warn("Email not configured — skipping email alert");
+  if (!process.env.RESEND_API_KEY) {
+    runnerLogger.warn("RESEND_API_KEY not set — skipping email alert");
     return;
   }
 
   const { subject, html } = buildEmailBody(payload);
+  const from = process.env.EMAIL_FROM ?? "Failsafe <onboarding@resend.dev>";
 
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM ?? "alerts@qamonitor.app",
-    to: toEmail,
-    subject,
-    html,
-  });
+  const { error } = await resend.emails.send({ from, to: toEmail, subject, html });
+
+  if (error) {
+    throw new Error(`Resend error: ${error.message}`);
+  }
 
   runnerLogger.info("Email alert sent", { to: toEmail });
 }
