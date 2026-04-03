@@ -6,6 +6,7 @@
  */
 
 import type { Page } from "playwright";
+import { runnerLogger } from "../src/lib/logger";
 
 export interface StepResult {
   step: string;
@@ -248,6 +249,6 @@ export async function executeStep(
   }
 
   // No handler matched — skip with a warning (don't fail the flow)
-  console.warn(`  ⚠ No handler matched step: "${normalized}" — skipping`);
+  runnerLogger.warn("No handler matched step — skipping", { step: normalized });
   return { step, passed: true, durationMs: 0 };
 }

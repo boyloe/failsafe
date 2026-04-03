@@ -7,47 +7,40 @@
  *
  * Usage:
  *   npx tsx runner/scheduler.ts
- *
- * Or via cron (runs every 15 min, scheduler handles interval logic internally):
- *   [every 15 min] cd /path/to/qa-dashboard && npx tsx runner/scheduler.ts
  */
 
 import "dotenv/config";
 import cron from "node-cron";
-import path from "path";
 import { PrismaClient, Plan, TestStatus } from "@prisma/client";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { runFlow } from "./run-flow";
 import { sendEmailAlert, sendTelegramAlert, sendSlackAlert } from "./alerts";
+import { runnerLogger } from "../src/lib/logger";
 
 // ── DB setup ─────────────────────────────────────────────────────────────────
 
-const dbPath = path.resolve(process.cwd(), "dev.db");
-const adapter = new PrismaBetterSqlite3({ url: dbPath });
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! });
 const prisma = new PrismaClient({ adapter });
 
 // ── Plan → interval mapping ──────────────────────────────────────────────────
 
 const PLAN_INTERVALS: Record<Plan, number> = {
-  STARTER: 24 * 60,     // every 24 hours (minutes)
-  PRO: 60,              // every 1 hour
-  ENTERPRISE: 15,       // every 15 minutes
+  STARTER: 24 * 60,  // every 24 hours (minutes)
+  PRO: 60,           // every 1 hour
+  ENTERPRISE: 15,    // every 15 minutes
 };
 
 // ── Core runner ───────────────────────────────────────────────────────────────
 
 async function runDueFlows(): Promise<void> {
-  console.log(`\n[${new Date().toISOString()}] 🔍 Checking for due flows...`);
+  runnerLogger.info("Checking for due flows");
 
-  // Load all active flows with their client, user, last result, and alert config
   const flows = await prisma.testFlow.findMany({
     where: { isActive: true },
     include: {
       client: {
         include: {
-          user: {
-            include: { accounts: false },
-          },
+          user: { include: { accounts: false } },
         },
       },
       results: {
@@ -62,8 +55,7 @@ async function runDueFlows(): Promise<void> {
 
   for (const flow of flows) {
     const user = flow.client.user;
-    const intervalMinutes = PLAN_INTERVALS[user.plan];
-    const intervalMs = intervalMinutes * 60 * 1000;
+    const intervalMs = PLAN_INTERVALS[user.plan] * 60 * 1000;
 
     const lastRun = flow.results[0]?.ranAt;
     const isDue = !lastRun || now - new Date(lastRun).getTime() >= intervalMs;
@@ -74,22 +66,29 @@ async function runDueFlows(): Promise<void> {
       ? `${Math.round((now - new Date(lastRun).getTime()) / 60000)}m ago`
       : "never";
 
-    console.log(`\n▶ Running: "${flow.name}" (${flow.client.name}) — last run: ${timeSince}`);
+    runnerLogger.info("Running flow", {
+      flow: flow.name,
+      client: flow.client.name,
+      lastRun: timeSince,
+    });
 
     let steps: string[];
     try {
       steps = JSON.parse(flow.steps) as string[];
     } catch {
-      console.error(`  ✗ Invalid steps JSON for flow ${flow.id}`);
+      runnerLogger.error("Invalid steps JSON", { flowId: flow.id });
       continue;
     }
 
     const result = await runFlow(flow.id, flow.name, flow.client.url, steps);
     ran++;
 
-    console.log(
-      `  ${result.status === "PASS" ? "✅" : "❌"} ${result.status} in ${result.durationMs}ms`
-    );
+    runnerLogger.info("Flow complete", {
+      flow: flow.name,
+      status: result.status,
+      durationMs: result.durationMs,
+      error: result.error,
+    });
 
     // Save result to DB
     await prisma.testResult.create({
@@ -111,7 +110,6 @@ async function runDueFlows(): Promise<void> {
     const newFailure = nowFailing && !wasFailingBefore;
 
     if (newFailure || justRecovered) {
-      // Open or resolve incident
       if (newFailure) {
         await prisma.incident.create({
           data: {
@@ -121,16 +119,15 @@ async function runDueFlows(): Promise<void> {
             status: "OPEN",
           },
         });
-        console.log(`  🚨 New incident created`);
+        runnerLogger.warn("New incident created", { flow: flow.name, client: flow.client.name });
       } else if (justRecovered) {
         await prisma.incident.updateMany({
           where: { flowId: flow.id, status: "OPEN" },
           data: { status: "RESOLVED", resolvedAt: new Date() },
         });
-        console.log(`  ✅ Incident resolved`);
+        runnerLogger.info("Incident resolved", { flow: flow.name });
       }
 
-      // Load alert config
       const alertConfig = await prisma.alertConfig.findUnique({
         where: { userId: user.id },
       });
@@ -145,61 +142,49 @@ async function runDueFlows(): Promise<void> {
         ranAt: new Date(),
       };
 
-      // Fire alerts
       if (alertConfig?.email && user.email) {
         await sendEmailAlert(user.email, alertPayload).catch((err) =>
-          console.error(`  Email alert error: ${err}`)
+          runnerLogger.error("Email alert failed", { error: err instanceof Error ? err.message : String(err) })
         );
       }
 
       if (alertConfig?.telegram) {
         await sendTelegramAlert(alertConfig.telegram, alertPayload).catch((err) =>
-          console.error(`  Telegram alert error: ${err}`)
+          runnerLogger.error("Telegram alert failed", { error: err instanceof Error ? err.message : String(err) })
         );
       }
 
       if (alertConfig?.slack) {
         await sendSlackAlert(alertConfig.slack, alertPayload).catch((err) =>
-          console.error(`  Slack alert error: ${err}`)
+          runnerLogger.error("Slack alert failed", { error: err instanceof Error ? err.message : String(err) })
         );
       }
     }
   }
 
-  console.log(
-    `\n[${new Date().toISOString()}] ✓ Done — ran ${ran}/${flows.length} flows`
-  );
+  runnerLogger.info("Run complete", { ran, total: flows.length });
 }
 
 // ── Cron schedule ─────────────────────────────────────────────────────────────
-//
-// Runs every 15 minutes. The runDueFlows() fn handles which flows are actually
-// due based on each user's plan interval — so Enterprise clients get checked
-// every tick, Pro every hour, Starter once a day.
 
 const SCHEDULE = "*/15 * * * *";
 
-console.log("🚀 QA Monitor runner started");
-console.log(`📅 Schedule: ${SCHEDULE}`);
-console.log(`🗃  DB: ${dbPath}\n`);
+runnerLogger.info("Runner started", { schedule: SCHEDULE, db: "postgresql (Supabase)" });
 
 // Run immediately on start
-runDueFlows().catch(console.error);
+runDueFlows().catch((err) => runnerLogger.error("runDueFlows crashed", { error: err.message }));
 
 // Then on schedule
 cron.schedule(SCHEDULE, () => {
-  runDueFlows().catch(console.error);
+  runDueFlows().catch((err) => runnerLogger.error("runDueFlows crashed", { error: err.message }));
 });
 
 // Graceful shutdown
-process.on("SIGTERM", async () => {
-  console.log("\n👋 Runner shutting down...");
+async function shutdown() {
+  runnerLogger.info("Runner shutting down");
   await prisma.$disconnect();
   process.exit(0);
-});
+}
 
-process.on("SIGINT", async () => {
-  console.log("\n👋 Runner shutting down...");
-  await prisma.$disconnect();
-  process.exit(0);
-});
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

@@ -9,6 +9,7 @@ import { chromium } from "playwright";
 import path from "path";
 import fs from "fs";
 import { executeStep, type StepResult } from "./step-executor";
+import { runnerLogger } from "../src/lib/logger";
 
 export interface FlowRunResult {
   status: "PASS" | "FAIL" | "ERROR";
@@ -73,16 +74,16 @@ export async function runFlow(
     let failedStep: StepResult | null = null;
 
     for (const step of steps) {
-      console.log(`  → ${step}`);
+      runnerLogger.debug("Executing step", { step });
       const result = await executeStep(page, step, baseUrl);
       stepResults.push(result);
 
       if (!result.passed) {
         failedStep = result;
-        console.log(`  ✗ FAILED: ${result.error}`);
+        runnerLogger.warn("Step failed", { step, error: result.error });
         break;
       }
-      console.log(`  ✓ ${result.durationMs}ms`);
+      runnerLogger.debug("Step passed", { step, durationMs: result.durationMs });
     }
 
     const durationMs = Date.now() - start;
@@ -105,7 +106,7 @@ export async function runFlow(
   } catch (err) {
     const durationMs = Date.now() - start;
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`  ✗ RUNNER ERROR: ${message}`);
+    runnerLogger.error("Runner crashed", { flowId, error: message });
     return {
       status: "ERROR",
       durationMs,

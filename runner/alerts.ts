@@ -5,6 +5,7 @@
  */
 
 import nodemailer from "nodemailer";
+import { runnerLogger } from "../src/lib/logger";
 
 export interface AlertPayload {
   clientName: string;
@@ -88,7 +89,7 @@ export async function sendEmailAlert(
 ): Promise<void> {
   const transporter = getTransporter();
   if (!transporter) {
-    console.warn("  ⚠ Email not configured — skipping email alert");
+    runnerLogger.warn("Email not configured — skipping email alert");
     return;
   }
 
@@ -101,7 +102,7 @@ export async function sendEmailAlert(
     html,
   });
 
-  console.log(`  📧 Email alert sent to ${toEmail}`);
+  runnerLogger.info("Email alert sent", { to: toEmail });
 }
 
 // ── Telegram ──────────────────────────────────────────────────────────────────
@@ -112,7 +113,7 @@ export async function sendTelegramAlert(
 ): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
-    console.warn("  ⚠ TELEGRAM_BOT_TOKEN not set — skipping Telegram alert");
+    runnerLogger.warn("TELEGRAM_BOT_TOKEN not set — skipping Telegram alert");
     return;
   }
 
@@ -149,10 +150,9 @@ export async function sendTelegramAlert(
   });
 
   if (!res.ok) {
-    const body = await res.text();
-    console.error(`  ❌ Telegram alert failed: ${body}`);
+    runnerLogger.error("Telegram alert failed", { chatId, body: await res.text() });
   } else {
-    console.log(`  📱 Telegram alert sent to ${chatId}`);
+    runnerLogger.info("Telegram alert sent", { chatId });
   }
 }
 
@@ -202,8 +202,8 @@ export async function sendSlackAlert(
   });
 
   if (!res.ok) {
-    console.error(`  ❌ Slack alert failed: ${await res.text()}`);
+    runnerLogger.error("Slack alert failed", { body: await res.text() });
   } else {
-    console.log(`  💬 Slack alert sent`);
+    runnerLogger.info("Slack alert sent", { webhookUrl });
   }
 }
