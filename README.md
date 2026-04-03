@@ -1,4 +1,4 @@
-# QA Monitor
+# Failsafe
 
 > AI-powered automated QA testing for websites. Define your critical user flows in plain English — we run them on schedule and alert you instantly when something breaks.
 
@@ -11,7 +11,7 @@
 
 ## What It Does
 
-QA Monitor watches your website so you don't have to. You describe what should work ("go to /checkout, fill in email, click submit, expect 'Order confirmed'") and the system runs those steps automatically — daily, hourly, or every 15 minutes depending on your plan.
+Failsafe watches your website so you don't have to. You describe what should work ("go to /checkout, fill in email, click submit, expect 'Order confirmed'") and the system runs those steps automatically — daily, hourly, or every 15 minutes depending on your plan.
 
 When something breaks, you get an alert in seconds. In plain English. With a screenshot.
 
@@ -23,9 +23,12 @@ When something breaks, you get an alert in seconds. In plain English. With a scr
 
 - **Plain-English test flows** — no code required to define tests
 - **Real browser testing** — Playwright + Chromium, not synthetic pings
-- **Multi-channel alerts** — Email, Telegram, Slack
+- **Multi-channel alerts** — Email (Resend), Telegram, Slack
+- **DB-backed alert queue** — exponential backoff retry, survives process restarts
 - **Incident tracking** — automatic open/resolve lifecycle
 - **Recovery detection** — alerts when a failing flow starts passing again
+- **Structured logging** — Winston JSON logs in production, colorized in dev
+- **Health check endpoint** — `/api/health` with DB ping and uptime
 - **Stripe subscriptions** — three-tier pricing, billing portal included
 - **Magic link auth** — no passwords, NextAuth v5
 - **Dashboard** — overview, client management, flow history
@@ -39,11 +42,13 @@ When something breaks, you get an alert in seconds. In plain English. With a scr
 | Framework | Next.js 16 (App Router) |
 | Language | TypeScript |
 | Styling | Tailwind CSS v4 |
-| Database | SQLite via Prisma 7 |
-| DB Adapter | `@prisma/adapter-better-sqlite3` |
+| Database | PostgreSQL via Prisma 7 |
+| DB Adapter | `@prisma/adapter-pg` |
 | Auth | NextAuth v5 (magic link) |
+| Email | Resend |
 | Browser | Playwright + Chromium headless |
 | Payments | Stripe (subscriptions) |
+| Logging | Winston (JSON in prod, colorized in dev) |
 | Process mgr | PM2 |
 | Runtime | Node.js 22 |
 
@@ -69,22 +74,24 @@ qa-dashboard/
 │   │   │       └── AlertConfigForm.tsx # Alert preferences form
 │   │   └── api/
 │   │       ├── auth/[...nextauth]/     # NextAuth handler
+│   │       ├── health/                 # Health check endpoint
 │   │       └── stripe/
 │   │           ├── checkout/           # Create Stripe checkout session
 │   │           └── webhook/            # Handle Stripe webhook events
 │   └── lib/
-│       ├── prisma.ts                   # Prisma client singleton
+│       ├── prisma.ts                   # Prisma client singleton (pg adapter)
+│       ├── logger.ts                   # Winston logger + subsystem children
 │       ├── auth.ts                     # NextAuth config
 │       └── stripe.ts                   # Stripe client + helpers
 ├── runner/
 │   ├── scheduler.ts                    # Main cron entry point
 │   ├── run-flow.ts                     # Playwright flow executor
 │   ├── step-executor.ts                # Plain-English step parser
-│   └── alerts.ts                       # Email / Telegram / Slack alerts
+│   ├── alerts.ts                       # Email (Resend) / Telegram / Slack senders
+│   └── alert-queue.ts                  # DB-backed queue with retry + backoff
 ├── prisma/
 │   ├── schema.prisma                   # DB schema
-│   ├── seed.ts                         # Demo data seeder
-│   └── migrations/                     # SQL migration history
+│   └── seed.ts                         # Demo data seeder
 ├── ecosystem.config.js                 # PM2 process config
 └── logs/                               # PM2 log output
 ```
@@ -96,15 +103,16 @@ qa-dashboard/
 ### Prerequisites
 
 - Node.js 22+
+- PostgreSQL database (we use [Supabase](https://supabase.com) free tier)
+- A [Resend](https://resend.com) account for email alerts
 - A Telegram bot token (for alerts) — create via [@BotFather](https://t.me/botfather)
 - A Stripe account (test mode is fine to start)
-- SMTP credentials for email (or skip for Telegram-only alerts)
 
 ### 1. Clone & install
 
 ```bash
-git clone https://github.com/boyloe/qa-monitor.git
-cd qa-monitor
+git clone https://github.com/boyloe/failsafe.git
+cd failsafe
 npm install
 ```
 
@@ -136,7 +144,7 @@ See [Environment Variables](#environment-variables) for details.
 ### 4. Set up the database
 
 ```bash
-npx prisma migrate deploy
+npx prisma db push
 npx prisma generate
 ```
 
@@ -172,19 +180,17 @@ pm2 startup  # follow the printed instructions
 Create a `.env` file in the project root:
 
 ```env
-# Database
-DATABASE_URL="file:./dev.db"
+# Database (PostgreSQL)
+DATABASE_URL="postgresql://user:password@host:5432/dbname"
 
 # NextAuth
 AUTH_SECRET="your-random-secret-here"    # generate with: openssl rand -base64 32
 NEXTAUTH_URL="https://yourdomain.com"
 
-# Email (for magic link auth + email alerts)
-EMAIL_SERVER_HOST="smtp.resend.com"
-EMAIL_SERVER_PORT="587"
-EMAIL_SERVER_USER="resend"
-EMAIL_SERVER_PASSWORD="your-resend-api-key"
-EMAIL_FROM="noreply@yourdomain.com"
+# Email — Resend (https://resend.com)
+RESEND_API_KEY="re_..."
+EMAIL_FROM="Failsafe <alerts@yourdomain.com>"
+# Note: without a custom domain, use: "Failsafe <onboarding@resend.dev>"
 
 # Stripe
 STRIPE_SECRET_KEY="sk_live_..."
@@ -202,6 +208,32 @@ NEXT_PUBLIC_APP_URL="https://yourdomain.com"
 ```
 
 > **Note:** Never commit `.env` to git. It's in `.gitignore`.
+
+---
+
+## Health Check
+
+The `/api/health` endpoint returns system status:
+
+```bash
+curl https://yourdomain.com/api/health
+```
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-04-03T21:27:30.167Z",
+  "uptime": 3600.5,
+  "checks": {
+    "database": {
+      "status": "ok",
+      "latencyMs": 42
+    }
+  }
+}
+```
+
+Returns `200` when healthy, `503` when degraded (e.g. DB unreachable).
 
 ---
 
@@ -263,24 +295,23 @@ The scheduler (`runner/scheduler.ts`) runs as a persistent process via PM2. Ever
 3. Runs due flows via Playwright (headless Chromium)
 4. Saves results (pass/fail/error, duration, error message, screenshot path)
 5. Detects state changes:
-   - **New failure** → creates incident, fires alerts
-   - **Recovery** → resolves incident, fires recovery alert
-6. Waits for next tick
+   - **New failure** → creates incident, enqueues alerts
+   - **Recovery** → resolves incident, enqueues recovery alert
 
-This means:
-- Enterprise clients are checked every 15-minute tick
-- Pro clients are checked once per hour (when 60+ minutes have passed since last run)
-- Starter clients are checked once per day
+A separate cron (every 1 minute) drains the alert queue:
+- Attempts delivery via Resend / Telegram / Slack
+- On failure: retries with exponential backoff (1m → 5m → 15m → 60m → 240m)
+- After 5 failed attempts: marks permanently FAILED and logs clearly
 
 ---
 
 ## Alert Channels
 
+### Email (Resend)
+Set `RESEND_API_KEY` in `.env`. Sends HTML emails with error details and a dashboard link. Reliable delivery via Resend's API — no SMTP config needed.
+
 ### Telegram
 Set `TELEGRAM_BOT_TOKEN` in `.env`. Users add their Telegram chat ID in the Settings page. Alerts include flow name, client, error message, and timestamp.
-
-### Email
-Requires SMTP config. Sends HTML emails with error details and a link to the dashboard.
 
 ### Slack
 Add an incoming webhook URL in the Settings page. Sends formatted attachments with color-coded status.
@@ -289,7 +320,7 @@ Add an incoming webhook URL in the Settings page. Sends formatted attachments wi
 
 ## Stripe Webhook Setup
 
-Register your webhook endpoint in the Stripe dashboard (or via CLI):
+Register your webhook endpoint in the Stripe dashboard:
 
 ```
 POST https://yourdomain.com/api/stripe/webhook
@@ -315,6 +346,7 @@ Core models:
 - **TestResult** — individual run outcome (pass/fail/error, duration, error, screenshot)
 - **Incident** — open/resolved failure events (created automatically)
 - **AlertConfig** — per-user alert preferences (email, Telegram, Slack)
+- **AlertQueue** — queued alerts with retry state (channel, destination, payload, attempts, backoff)
 
 ---
 
@@ -326,16 +358,18 @@ If deploying dashboard to Vercel:
 1. Add all env vars in Vercel project settings
 2. Update `NEXTAUTH_URL` and `NEXT_PUBLIC_APP_URL` to your production domain
 3. Update the Stripe webhook URL to your Vercel domain
-4. Keep the runner on VPS, pointing to the same SQLite DB (or migrate to Postgres for shared access)
+4. Keep the runner on the VPS pointing to the same PostgreSQL DB
 
 ---
 
 ## Development Notes
 
-- **Prisma 7**: The `url` property in `datasource db {}` is no longer supported. Connection config lives in `prisma.config.ts`.
-- **Tailwind v4**: Uses `@import "tailwindcss"` and `@theme {}` blocks instead of the v3 config file.
+- **Prisma 7**: The `url` property in `datasource db {}` is no longer supported. Connection config lives in `prisma.config.ts`. Use `@prisma/adapter-pg` and pass `new PrismaPg({ connectionString })` to the `PrismaClient` constructor.
+- **Database migrations**: Use `npx prisma db push` for schema changes during development (avoids migration history conflicts). Set up proper `migrate` workflow before production launch.
+- **Tailwind v4**: Uses `@import "tailwindcss"` and `@theme {}` blocks instead of the v3 config file. Requires `@source` directives in `globals.css` for utility classes to compile.
 - **NextAuth v5**: Uses `auth()` server-side instead of `getServerSession()`. Session callbacks receive `user` not `token`.
 - **Ubuntu 24.04**: Several apt packages were renamed with `t64` suffix (`libatk1.0-0t64`, `libasound2t64`, etc.).
+- **Logging**: All subsystems use Winston child loggers (`runnerLogger`, `stripeLogger`, etc.) — never `console.log` in production code.
 
 ---
 
