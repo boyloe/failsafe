@@ -14,8 +14,9 @@ import cron from "node-cron";
 import { PrismaClient, Plan, TestStatus } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { runFlow } from "./run-flow";
-import { sendEmailAlert, sendTelegramAlert, sendSlackAlert } from "./alerts";
+import { enqueueAlert, processAlertQueue } from "./alert-queue";
 import { runnerLogger } from "../src/lib/logger";
+import { AlertChannel } from "@prisma/client";
 
 // ── DB setup ─────────────────────────────────────────────────────────────────
 
@@ -143,21 +144,15 @@ async function runDueFlows(): Promise<void> {
       };
 
       if (alertConfig?.email && user.email) {
-        await sendEmailAlert(user.email, alertPayload).catch((err) =>
-          runnerLogger.error("Email alert failed", { error: err instanceof Error ? err.message : String(err) })
-        );
+        await enqueueAlert(prisma, AlertChannel.EMAIL, user.email, alertPayload);
       }
 
       if (alertConfig?.telegram) {
-        await sendTelegramAlert(alertConfig.telegram, alertPayload).catch((err) =>
-          runnerLogger.error("Telegram alert failed", { error: err instanceof Error ? err.message : String(err) })
-        );
+        await enqueueAlert(prisma, AlertChannel.TELEGRAM, alertConfig.telegram, alertPayload);
       }
 
       if (alertConfig?.slack) {
-        await sendSlackAlert(alertConfig.slack, alertPayload).catch((err) =>
-          runnerLogger.error("Slack alert failed", { error: err instanceof Error ? err.message : String(err) })
-        );
+        await enqueueAlert(prisma, AlertChannel.SLACK, alertConfig.slack, alertPayload);
       }
     }
   }
@@ -167,16 +162,23 @@ async function runDueFlows(): Promise<void> {
 
 // ── Cron schedule ─────────────────────────────────────────────────────────────
 
-const SCHEDULE = "*/15 * * * *";
+const FLOW_SCHEDULE = "*/15 * * * *";
+const QUEUE_SCHEDULE = "* * * * *"; // every minute
 
-runnerLogger.info("Runner started", { schedule: SCHEDULE, db: "postgresql (Supabase)" });
+runnerLogger.info("Runner started", { schedule: FLOW_SCHEDULE, db: "postgresql (Supabase)" });
 
 // Run immediately on start
 runDueFlows().catch((err) => runnerLogger.error("runDueFlows crashed", { error: err.message }));
+processAlertQueue(prisma).catch((err) => runnerLogger.error("processAlertQueue crashed", { error: err.message }));
 
-// Then on schedule
-cron.schedule(SCHEDULE, () => {
+// Flow check every 15 min
+cron.schedule(FLOW_SCHEDULE, () => {
   runDueFlows().catch((err) => runnerLogger.error("runDueFlows crashed", { error: err.message }));
+});
+
+// Alert queue drain every minute
+cron.schedule(QUEUE_SCHEDULE, () => {
+  processAlertQueue(prisma).catch((err) => runnerLogger.error("processAlertQueue crashed", { error: err.message }));
 });
 
 // Graceful shutdown

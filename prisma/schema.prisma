@@ -155,3 +155,34 @@ model AlertConfig {
 
   @@map("alert_configs")
 }
+
+// ─── Alert Queue (retry logic) ───────────────────────────────────────────────
+
+model AlertQueue {
+  id          String           @id @default(cuid())
+  channel     AlertChannel
+  destination String           // email address, telegram chat ID, slack webhook
+  payload     Json             // AlertPayload serialized
+  status      AlertQueueStatus @default(PENDING)
+  attempts    Int              @default(0)
+  maxAttempts Int              @default(5)
+  nextRetryAt DateTime         @default(now())
+  lastError   String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([status, nextRetryAt])
+  @@map("alert_queue")
+}
+
+enum AlertChannel {
+  EMAIL
+  TELEGRAM
+  SLACK
+}
+
+enum AlertQueueStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
