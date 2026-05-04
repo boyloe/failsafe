@@ -15,7 +15,9 @@ export interface StepResult {
   durationMs: number;
 }
 
-type StepHandler = (page: Page, args: string) => Promise<void>;
+// Receives the full RegExpMatchArray so handlers can access each capture group
+// directly without re-parsing the already-extracted text.
+type StepHandler = (page: Page, match: RegExpMatchArray) => Promise<void>;
 
 // ── Command patterns ────────────────────────────────────────────────────────
 // Each entry: [regex to match step text, handler fn]
@@ -23,8 +25,8 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Navigate
   [
     /^(?:go to|navigate to|open|visit)\s+(.+)$/i,
-    async (page, args) => {
-      const url = args.trim();
+    async (page, match) => {
+      const url = match[1].trim();
       const fullUrl = url.startsWith("http") ? url : `${getBaseUrl(page)}${url}`;
       await page.goto(fullUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
     },
@@ -33,30 +35,25 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Click
   [
     /^click(?:\s+(?:on|the))?\s+['"]?(.+?)['"]?$/i,
-    async (page, args) => {
-      await page.click(`text=${args}`, { timeout: 8000 });
+    async (page, match) => {
+      await page.click(`text=${match[1]}`, { timeout: 8000 });
     },
   ],
 
-  // Fill / type
+  // Fill / type — "fill in email with test@example.com" or "fill in email: value"
   [
     /^(?:fill in|type|enter|input)\s+(.+?)\s*(?:with|:)\s*(.+)$/i,
-    async (page, args) => {
-      // e.g. "fill in email with test@example.com" or "fill in email: test@example.com"
-      const match = args.match(/^(.+?)\s*(?:with|:)\s*(.+)$/i);
-      if (!match) throw new Error(`Could not parse fill step: ${args}`);
+    async (page, match) => {
       const [, fieldHint, value] = match;
       const selector = await findInput(page, fieldHint.trim());
       await page.fill(selector, value.trim());
     },
   ],
 
-  // Type into field (alternate form)
+  // Type into field (alternate) — 'fill in "value" into the fieldName'
   [
     /^(?:fill in|enter)\s+['"](.+?)['"]\s+(?:in(?:to)?|into)?\s+(?:the\s+)?(.+)$/i,
-    async (page, args) => {
-      const match = args.match(/^['"](.+?)['"]\s+(?:in(?:to)?|into)?\s+(?:the\s+)?(.+)$/i);
-      if (!match) throw new Error(`Could not parse fill step: ${args}`);
+    async (page, match) => {
       const [, value, fieldHint] = match;
       const selector = await findInput(page, fieldHint.trim());
       await page.fill(selector, value);
@@ -66,9 +63,7 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Select dropdown
   [
     /^select\s+['"]?(.+?)['"]?\s+from\s+(?:the\s+)?(.+)$/i,
-    async (page, args) => {
-      const match = args.match(/^['"]?(.+?)['"]?\s+from\s+(?:the\s+)?(.+)$/i);
-      if (!match) throw new Error(`Could not parse select step: ${args}`);
+    async (page, match) => {
       const [, value, fieldHint] = match;
       const selector = await findInput(page, fieldHint.trim());
       await page.selectOption(selector, { label: value });
@@ -83,12 +78,11 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
     },
   ],
 
-  // Expect text on page (with or without quotes)
+  // Expect text on page (with trailing qualifier)
   [
     /^expect\s+['"]?(.+?)['"]?\s+(?:on|in|to be on|to appear on|is visible on)\s*(?:page|screen)?$/i,
-    async (page, args) => {
-      // Strip surrounding quotes if present
-      const text = args.replace(/^['"]|['"]$/g, "").trim();
+    async (page, match) => {
+      const text = match[1].replace(/^['"]|['"]$/g, "").trim();
       await page.waitForSelector(`text=${text}`, { timeout: 10000 });
     },
   ],
@@ -96,8 +90,8 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Expect text on page (no trailing qualifier — just "expect 'X'")
   [
     /^expect\s+['"](.+?)['"]$/i,
-    async (page, args) => {
-      const text = args.replace(/^['"]|['"]$/g, "").trim();
+    async (page, match) => {
+      const text = match[1].replace(/^['"]|['"]$/g, "").trim();
       await page.waitForSelector(`text=${text}`, { timeout: 10000 });
     },
   ],
@@ -105,8 +99,8 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Expect URL / redirect
   [
     /^expect\s+(?:redirect\s+to|url(?:\s+to be)?|to be at)\s+(.+)$/i,
-    async (page, args) => {
-      const expected = args.trim();
+    async (page, match) => {
+      const expected = match[1].trim();
       await page.waitForURL((url) => url.toString().includes(expected), {
         timeout: 10000,
       });
@@ -116,8 +110,8 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Expect HTTP status (via response interception — works on navigation)
   [
     /^expect\s+http\s+(\d+)$/i,
-    async (page, args) => {
-      const code = parseInt(args.trim(), 10);
+    async (page, match) => {
+      const code = parseInt(match[1].trim(), 10);
       const response = await page.waitForResponse((r) => r.status() === code, {
         timeout: 5000,
       });
@@ -128,8 +122,8 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Expect element visible
   [
     /^expect\s+(?:the\s+)?(.+?)\s+(?:to be visible|is visible|exists?|to exist)$/i,
-    async (page, args) => {
-      const hint = args.trim();
+    async (page, match) => {
+      const hint = match[1].trim();
       await page.waitForSelector(`[aria-label*="${hint}" i], [placeholder*="${hint}" i], text=${hint}`, {
         timeout: 8000,
       });
@@ -139,12 +133,9 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Expect at least N elements
   [
     /^expect\s+at\s+least\s+(\d+)\s+(.+)$/i,
-    async (page, args) => {
-      const match = args.match(/^(\d+)\s+(.+)$/);
-      if (!match) throw new Error(`Could not parse count assertion: ${args}`);
-      const [, countStr, selector] = match;
-      const count = parseInt(countStr, 10);
-      // Try as CSS, then as text
+    async (page, match) => {
+      const count = parseInt(match[1], 10);
+      const selector = match[2];
       const elements = await page.$$(selector).catch(() => []);
       const byText = await page.$$(`text=${selector}`).catch(() => []);
       const total = Math.max(elements.length, byText.length);
@@ -154,14 +145,11 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
     },
   ],
 
-  // Wait
+  // Wait — captures unit as group so seconds can be correctly converted to ms
   [
-    /^wait\s+(\d+)(?:ms|s)?$/i,
-    async (page, args) => {
-      const match = args.match(/^(\d+)(ms|s)?$/i);
-      if (!match) return;
-      const [, num, unit] = match;
-      const ms = unit?.toLowerCase() === "s" ? parseInt(num) * 1000 : parseInt(num);
+    /^wait\s+(\d+)(ms|s)?$/i,
+    async (page, match) => {
+      const ms = match[2]?.toLowerCase() === "s" ? parseInt(match[1]) * 1000 : parseInt(match[1]);
       await page.waitForTimeout(ms);
     },
   ],
@@ -169,9 +157,9 @@ const HANDLERS: Array<[RegExp, StepHandler]> = [
   // Verify no element / text
   [
     /^verify\s+(?:no|not)\s+(.+)$/i,
-    async (page, args) => {
-      const count = await page.$$(`text=${args.trim()}`).then((els) => els.length);
-      if (count > 0) throw new Error(`Expected "${args.trim()}" to not be present, but found it`);
+    async (page, match) => {
+      const count = await page.$$(`text=${match[1].trim()}`).then((els) => els.length);
+      if (count > 0) throw new Error(`Expected "${match[1].trim()}" to not be present, but found it`);
     },
   ],
 ];
@@ -233,9 +221,7 @@ export async function executeStep(
     const match = normalized.match(pattern);
     if (match) {
       try {
-        // Pass everything after the matched verb as args
-        const args = match.slice(1).join(" ");
-        await handler(page, args);
+        await handler(page, match);
         return { step, passed: true, durationMs: Date.now() - start };
       } catch (err) {
         return {
